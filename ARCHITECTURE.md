@@ -1,182 +1,202 @@
-# Architecture
+# Архитектура
 
-> Authoritative design doc for humans and agents.
-> Agent rules: AGENTS.md. Decisions: docs/adr/.
+Telegram-бот для студентов-медиков: задания, сроки, личные отметки, напоминания
+и групповые дайджесты. Реализован MVP из утверждённых [плана](docs/plans/2026-10-25-mvp.md)
+и [контрактов](docs/contracts/mvp.md). Правила для агентов — AGENTS.md.
 
-## 1. Context
+## 1. Границы и технологии
 
-Medical bot (@NSMU_medicial_bot) replaces ad-hoc "homework in the group chat"
-with a structured Telegram flow: assignments, tests, deadlines, reminders,
-digests, completion marks.
+Go 1.27.1, telegram-bot-api/v5, SQLite через modernc (CGO_ENABLED=0), embedded
+goose-миграции. Один процесс long polling и scheduler, один контейнер с volume.
+Интерфейс — команды и кнопки Telegram; HTTP API, web admin, внешний cron и
+брокер в MVP не добавляются. Нет оценок/LMS, данных пациентов и multi-tenant SaaS.
 
-- Primary users: students of one medical cohort.
-- Secondary: староста (editor).
-- Admin: single operator.
-- Storage: учебные данные only. No PHI, no clinical data.
+## 2. Слои и зависимости
 
-MVP scale: one cohort, ~100–500 users, low write rate, reads dominated by
-deadline lookups and digests.
+```mermaid
+flowchart LR
+    Telegram --> bot[internal/bot]
+    bot --> service[internal/service]
+    scheduler[internal/scheduler] --> service
+    service --> domain[internal/domain]
+    repository[internal/repository/sqlite] -. implements ports .-> service
+    repository --> SQLite[(SQLite volume)]
+    service -. sender and verifier ports .-> bot
+    main[cmd/bot: wiring] --> bot
+    main --> service
+    main --> scheduler
+    main --> repository
+```
 
-## 2. Component diagram
+- domain: сущности, enum, входные/выходные типы и sentinel errors; только stdlib.
+- service: сценарии, ACL, проверки, планирование, persistent dialogs, доставка;
+  интерфейсы потребляемых репозиториев, UnitOfWork и Telegram-портов.
+- repository/sqlite: SQL, сканирование, CAS, курсоры и общая транзакция.
+- bot: разбор update/callback, русские сообщения, клавиатуры, Telegram API,
+  пересылка файлов по file_id, общий rate limiter, безопасные ошибки API.
+- scheduler: три отменяемых цикла, вызывающие сервисные порты.
+- config: чтение optional .env, приоритет окружения, валидация без сетевых вызовов.
+- cmd/bot: конфигурация, миграции, seed admin, сборка зависимостей и shutdown.
+- cmd/migrate: применение той же схемы без Telegram и синхронизации ролей.
 
-        +--------------+   Telegram Bot API   +---------------+
-        |  Telegram    |<-------------------->|  internal/bot |
-        |   clients    |                      |  (handlers)   |
-        +--------------+                      +-------+-------+
-                                                      | calls
-                                              +-------v-------+
-                                              | internal/     |
-                                              |  service      |<---- domain
-                                              +---+-------+---+
-                                                  |       |
-                                   +--------------v-+ +---v--------------+
-                                   | internal/      | | internal/        |
-                                   | repository     | | scheduler        |
-                                   | (SQLite)       | | (in-process)     |
-                                   +-------+--------+ +-------+----------+
-                                           |                  | uses service
-                                    +------v------+           |
-                                    |  SQLite     |<----------+
-                                    |  file volume|
-                                    +-------------+
+SQL находится только в repository и migrations, Telegram SDK — только в bot.
+Интерфейсы и доменные типы не содержат SDK/sql-типов. Нет глобального клиента
+или глобального реестра миграций. Конструкторы получают clock, token generator,
+UnitOfWork, отправителя и проверку прав чата.
 
-Dependency direction (inward only):
+## 3. Контракты и права
 
-- internal/bot — Telegram transport. Parses updates, calls service, renders replies.
-- internal/service — use cases + interfaces it consumes (AssignmentRepo, UserRepo, ...).
-- internal/repository — SQLite implementation of service interfaces.
-- internal/domain — entities, sentinel errors, value objects. No deps.
-- internal/scheduler — time-driven jobs (reminders, digests). Uses service.
-- internal/config — env parsing.
-- cmd/bot — wiring, lifecycle, graceful shutdown.
+Полные сигнатуры: [docs/contracts/mvp.md](docs/contracts/mvp.md) и
+internal/service/interfaces.go. Их изменения проходят Lead и human approval.
 
-Interfaces live in the consumer (service), not in repository.
+Роли: student читает задания своей группы и управляет своими отметками;
+editor меняет предметы и задания своей группы; admin глобально управляет
+группами и редакторами, выбирая группу явно. Кнопка не считается проверкой прав.
+Каждый сервисный метод заново читает пользователя, проверяет роль, членство
+и версию объекта. Подмена group_id, subject_id, user_id или cursor не даёт доступа.
+Предмет другой группы дополнительно блокируется составным FK.
 
-## 3. Target directory layout
+Источник admin — ADMIN_TELEGRAM_IDS. При старте набор admin синхронизируется
+атомарно; исключённые ID становятся student, прочие editor сохраняются.
+Через меню выдаётся только editor. Регистрация из личного update меняет имя
+и доступность личного чата, сохраняя роль, дату и группу. Привязка из группы
+не включает личные отправки и требует уже существующего admin.
 
-    cmd/bot/main.go
-    internal/
-      bot/{router.go,handlers_*.go,keyboards.go,callback.go}
-      service/{assignment.go,user.go,reminder.go,digest.go,interfaces.go,errors.go}
-      repository/{sqlite/*.go, migrations.go}
-      domain/{assignment.go,user.go,group.go,errors.go}
-      scheduler/{scheduler.go,jobs.go}
-      config/config.go
-    migrations/0001_init.sql, ...
-    docs/adr/
+Callback закрыт: menu:<section>, tasks:<period>:<cursor>, subject:<id>:<cursor>,
+view:<id>, done:<id>:<version>, undo:<id>:<version>, snooze:<id>:<version>:3h,
+dlg:<id>:<revision>:<enum-or-id>. До 64 байт, всегда answerCallbackQuery.
+ID актора берётся только из Telegram From, а не из callback. Персональная
+отметка редактирует текущую личную карточку. Групповые кнопки — deep links в
+личный чат с повторной проверкой доступа. Подробности закрытых действий — в плане.
 
-## 4. Data model (MVP)
+При callback первый экран редактирует исходное сообщение. Цель редактирования
+живет только в context текущего update и не сохраняется между запросами;
+последующие части и файлы отправляются отдельно. Пустой набор кнопок явно
+убирает прежнюю клавиатуру. Известный edit-no-op считается успехом, остальные
+ошибки не подавляются; для недоступного/нередактируемого сообщения создаётся новое.
+Snooze подтверждается через answerCallbackQuery без повторной записи карточки.
+Карточка возвращает к заданиям предмета существующим subject callback; остальные
+экраны предлагают /start. /start без аргументов завершает активный мастер.
+Схема и форматы callback не меняются; стек навигации не добавляется.
 
-All timestamps UTC (TEXT, RFC3339). FKs enforced via PRAGMA foreign_keys = ON.
+## 4. Модель данных и горячие запросы
 
-- groups(id PK, title, invite_code UNIQUE, created_at)
-- users(id PK, telegram_id UNIQUE, display_name, group_id FK, role, created_at)
-    role in {student, editor, admin}
-- subjects(id PK, group_id FK, name, teacher NULL)
-- assignments(id PK, group_id FK, subject_id FK, kind, title, description,
-    deadline_at, importance, url NULL, created_by FK users.id, status,
-    created_at, updated_at)
-    kind in {homework, test, exam, practice, other}
-    status in {active, cancelled}
-- attachments(id PK, assignment_id FK, file_id, file_name, mime)
-- completions(user_id FK, assignment_id FK, done_at) — PK (user_id, assignment_id)
-- reminders(id PK, assignment_id FK, send_at, sent_at NULL, target)
-    target in {user:<id>, group:<id>}
-- audit_log(id PK, actor_id FK, action, entity, entity_id, payload_json, at)
-- settings(user_id FK, key, value) — per-user reminder prefs
+Схема: 0001_identity (не изменялась), 0002_learning, 0003_notifications.
+[docs/database.md](docs/database.md) описывает поля, ограничения, ER-диаграмму
+и назначение каждого индекса. Прикладные timestamps — RFC3339 UTC TEXT,
+local_date — календарная дата в TZ. WAL, foreign_keys=ON, busy_timeout=5000
+на каждом соединении, пул из одного соединения.
 
-Indexes: assignments(group_id, deadline_at), assignments(subject_id),
-reminders(send_at) WHERE sent_at IS NULL.
+Горячие индексы: users(group_id), subjects(group_id), активное уникальное имя
+предмета, assignments(group_id,deadline_at,id), assignments(subject_id),
+attachments(assignment_id), reminders(send_at) с частичным условием ожидания,
+reminders(user_id,assignment_id), outbox(status,next_attempt_at),
+outbox(lease_until) WHERE processing, outbox(user_id,reminder_id),
+outbox(digest_run_id), dialog_states(user_id)/expires_at WHERE active,
+audit_log(group_id,at,id). Keyset-пагинация заданий по времени и ID.
 
-## 5. Key flows
+Связанные записи изменяются через одну UnitOfWork: публикация задания и
+напоминаний, завершение мастера, отмена очереди, личные отметки и аудит.
+Транзакция не содержит HTTP и не допускает вложенного входа. Сохранение
+subject/group/assignment и шага диалога проверяет expected version/revision.
 
-5.1. Create assignment (editor)
+## 5. Интерактивные сценарии
 
-/add -> wizard (subject -> kind -> title -> desc -> deadline -> url/file -> publish)
--> service.CreateAssignment(ctx, input) -> insert + schedule default reminders
-(deadline-24h, deadline-3h) -> post card to group chat + persist message id for
-later edit/pin.
+/start → регистрация → меню → /join по коду или deep link. Один пользователь
+в одной группе. Смена группы требует выхода с подтверждением, а editor —
+предварительного снятия полномочий. История отметок сохраняется.
 
-5.2. Daily digest
+/admin → группа → предметы, приглашение, редакторы, участники, дайджест, аудит.
+Редактор управляет предметами через /subjects manage. Администратор может
+читать явную группу через /tasks <groupID> и /subjects <groupID> без членства.
+/bind проверяет роль admin бота и права администратора Telegram у отправителя
+и бота; допускаются только group/supergroup, один чат на учебную группу.
 
-scheduler tick (from DIGEST_TIME in TZ) -> service.BuildDigest(groupID, "day")
--> format -> bot.SendMessage(groupChatID) -> optional pin.
+/add → выбор группы при необходимости → предмет → вид → заголовок → описание
+→ будущий дедлайн в TZ → важность → URL → до десяти документов/фотографий →
+preview → подтверждение. До подтверждения есть только черновик. Создание не
+делает массовую рассылку. /edit проверяет исходную версию; /cancel_task
+сохраняет историю. Архивирование предмета скрывает его из нового выбора.
 
-5.3. Reminder
+Мастер хранится в dialog_states: один active на пользователя, TTL 30 минут,
+новый AUTOINCREMENT ID для каждого запуска, revision CAS, очищенный payload
+при completed/cancelled/expired. Сохраняются учебные поля, не исходный update.
+Финальная запись и завершение мастера атомарны. /cancel отменяет текущий.
 
-scheduler polls reminders due in the next minute -> service.DispatchReminder
--> bot.SendMessage(user|group) -> mark sent_at -> respect quiet hours.
+Карточки и previews делятся с учётом UTF-16 лимита Telegram. Текст без parse_mode.
+Вложения пересылаются по file_id без загрузки на сервер. Тексты интерфейса
+формируются в bot из типизированных результатов сервиса.
 
-5.4. Mark complete
+## 6. Scheduler и очередь
 
-Inline done:<assignmentID> -> service.MarkComplete(userID, assignmentID)
--> upsert completions -> update card in-place (personal view only).
+Планирование при старте и раз в 15 секунд: due reminders и сегодняшний digest.
+Один worker постоянно захватывает по одной outbox-записи; при пустой очереди
+ждёт до секунды. Просроченные мастера завершаются при старте и раз в минуту.
+Все циклы и ожидания прекращаются через context.
 
-## 6. Contracts
+Напоминания — только лично. Будущие интервалы берутся из REMINDER_OFFSETS;
+создание, вступление, undo и включение настроек не догоняют уже прошедшие.
+Изменение задания обновляет version и перепланирует оставшиеся интервалы.
+Done, leave, cancel и reminders off закрывают ожидающие отправки. Snooze
+отменяет ближайшие до выбранного времени, сохраняя последующие стандартные.
+Тихие часы в TZ сдвигают время на конец интервала; после срока не отправляем.
+За простой накопившиеся стандартные интервалы объединяются до последнего.
+Перед HTTP повторно проверяются версия, срок, членство, done и настройки.
 
-Any change below requires Lead approval + human confirmation before implementation.
+В группе только дайджест: активные дедлайны текущего календарного дня по TZ,
+по восемь заданий на часть, без персональных отметок. Пустой результат фиксируется.
+После простоя можно отправить сегодняшний, но не прошлые даты. UNIQUE(group,date)
+и отдельные event_key/receipts частей предотвращают повторное планирование.
+Перепривязка отменяет ожидающие части прежней binding version; уже созданный
+сегодня запуск не повторяется автоматически в новом чате.
 
-- Service interfaces (Go, internal/service/interfaces.go):
-  UserRepo, GroupRepo, SubjectRepo, AssignmentRepo, CompletionRepo,
-  ReminderRepo, AuditRepo. Method signatures are the contract; no silent additions.
-- DB schema: defined in migrations/. Schema change = new goose migration
-  (.up.sql + .down.sql) + ADR if non-trivial.
-- callback_data format: "<action>:<id>" (e.g. done:42, edit:42, snooze:42:3h).
-  Actions are a closed set; new actions get reviewed.
-- Env keys (in .env.example, single source of truth): BOT_TOKEN, DB_PATH, TZ,
-  DIGEST_TIME, REMINDER_OFFSETS, LOG_LEVEL, ENV.
-  Adding a key requires updating .env.example, README, and this doc.
-- Log fields: event, group_id, assignment_id, user_id, err.
+Outbox: lease 2 минуты с случайным токеном, до пяти попыток, паузы
+15/30/60/120 секунд, больший retry_after имеет приоритет. 403 выключает
+доступность личного чата до нового личного обращения. Во время HTTP БД свободна;
+после ответа ack, reminder.sent_at и digest progress фиксируются вместе.
+Просроченный token не может подтвердить новый захват. Лимиты общие с UI:
+20 сообщений/с, личный чат 1/с, группа 1/3,1с; ожидание отменяется context.
 
-## 7. Design decisions (see ADR)
+Подтверждённые события дедуплицированы. Crash между Telegram accept и DB ack
+может дать дубль; уже принятый HTTP-запрос нельзя надёжно отозвать. Exactly-once
+не обещается. Ошибки хранятся кодами без Telegram description, URL или токена.
 
-- ADR-0001: SQLite via modernc.org/sqlite (pure-Go) behind a repository
-  interface; swap to Postgres later if load demands it. Rationale: single
-  binary, CGO_ENABLED=0, trivial Docker build, one moving part on a single VPS.
-- ADR-0002: No web admin in MVP; admin via bot commands. Mini App later.
-- ADR-0003: Attachments stored as Telegram file_id, not re-uploaded.
-- ADR-0004: Scheduler is in-process (no external queue) for MVP.
-- ADR-0005: Migrations embedded into the binary (embed.FS + goose.Up at startup).
-  No separate migration container. Rationale: simplest deploy story on VPS.
-- ADR-0006: No in-repo CI. Image is built and pushed to the registry outside
-  this repository; VPS deploy is `docker compose pull && docker compose up -d`.
+## 7. Конфигурация и запуск
 
-## 8. Deployment
+Все восемь env-ключей перечислены в .env.example; новые в MVP не добавлены:
+BOT_TOKEN, ADMIN_TELEGRAM_IDS, DB_PATH, TZ, DIGEST_TIME, REMINDER_OFFSETS,
+LOG_LEVEL, ENV. Правила и значения по умолчанию — в README.md и config.
+Процессное окружение имеет приоритет над optional .env, включая явную пустоту;
+загрузка не меняет окружение процесса. Ошибки не включают значения секретов.
+TZ embedded; Local запрещён. LoadDatabase читает только DB_PATH.
 
-- Runtime: docker compose on a VPS.
-- Image: multi-stage build (CGO_ENABLED=0), distroless/alpine final stage,
-  single binary.
-- Config: .env next to docker-compose.yml.
-- Volume: ./data/bot.db mounted to DB_PATH.
-- Upgrades: docker compose pull && docker compose up -d. Migrations run at startup.
-- Rollback: pin previous image tag in compose.
-- Logs: docker compose logs -f; slog JSON in prod.
-- Backups: periodic `sqlite3 .backup` of bot.db (cron on host).
+Старт: config → DB → embedded migrations → admin sync → Telegram getMe →
+сервисы → polling + scheduler. SIGINT/SIGTERM отменяет HTTP и циклы, ожидает
+завершения worker и закрывает БД. 401/409 polling завершают приложение.
+Логи через slog: dev text, prod JSON, LOG_LEVEL; исходные сообщения и конфиг
+не печатаются. События app_started/app_stopped, handler_failed, scheduler_failed.
+Callback отдельно учитывает callback_failed и callback_answer_failed: исходная
+ошибка не теряется после успешного answer. Логи содержат действие, Telegram ID,
+категорию/тип и безопасный код ошибки; сырые error descriptions не печатаются.
+Ожидаемые бизнес-отказы — DEBUG, неожиданные сбои — ERROR.
 
-## 9. Extensibility points
+Docker Compose для локального запуска собирает один multi-stage образ,
+distroless nonroot 65532, /data в постоянном volume, без входящих портов.
+Shell в runtime нет. Production registry pull, backup и rollout выполняются
+оператором вне агентской сессии; production Compose не изменяется.
+CI/deploy-автоматизация в репозиторий не добавляется.
 
-- Mini App / web admin (over the same service layer).
-- Multiple groups/cohorts — group_id is already threaded through.
-- Google Calendar / ICS export (service.ExportICS).
-- Swap SQLite -> Postgres via the repository interface (ADR-0001).
+## 8. Проверки и решения
 
-## 10. Non-goals
+Unit-тесты сервисных проверок с fake repositories, adapter-тесты через
+httptest Telegram API, SQLite-интеграция на временных файлах, fake clock и
+fake sender. Проверяются роли, чужие группы, stale versions/revisions,
+TTL и повторное открытие БД, миграции Up/Down/Up, личные marks, quiet hours,
+snooze, отмена, retry_after, блокировка, lease fencing, части дайджеста и rebind.
+Сквозной тест проводит роли через команды и кнопки. make test-coverage
+считает совокупное покрытие internal/service всеми этими тестами (>=70%).
 
-- Grades, transcripts, LMS features.
-- Storing patient or clinical data.
-- Multi-tenant SaaS.
-- Real-time chat.
-- In-repo CI pipelines and deploy automation (out of scope for this repo).
-
-## 11. Observability
-
-- Structured logs via slog (JSON in prod).
-- Startup config dump (redacted).
-- Scheduler tick log with counts.
-- No metrics backend in MVP; leave interface for future.
-
-## 12. How to update this doc
-
-- Small edits: PR with `docs:` prefix, reviewed by Lead.
-- Architectural shifts: add a new ADR under docs/adr/NNNN-title.md, then update
-  this file. ADRs are append-only.
+Решения: [ADR-0007](docs/adr/0007-sqlite-bootstrap.md) — SQLite bootstrap и
+упаковка; [ADR-0008](docs/adr/0008-mvp-dialogs-and-delivery.md) — MVP и доставка.
+Исторические обозначения ADR-0001–0006 отдельными файлами пока не оформлены.
+Новые изменения контрактов требуют плана и human approval; ADR append-only.
