@@ -1,11 +1,34 @@
 GO ?= go
+GOLANGCI_LINT_VERSION ?= v2.13.2
+GOOSE_VERSION ?= v3.26.0
+
+ifeq ($(OS),Windows_NT)
+SHELL := cmd.exe
+BIN ?= bin/bot.exe
+else
 BIN ?= bin/bot
+endif
 
-.PHONY: setup run test test-race lint fmt build migrate
+.PHONY: setup env tools run test test-race lint fmt build migrate test-coverage docker-build docker-up docker-down docker-logs docker-check
 
-setup:
-	cp -n .env.example .env || true
+setup: env tools
 	$(GO) mod download
+
+env:
+ifeq ($(OS),Windows_NT)
+	@if not exist ".env" copy /y ".env.example" ".env" >NUL
+else
+	@test -e .env || cp .env.example .env
+endif
+
+tools:
+ifeq ($(OS),Windows_NT)
+	@golangci-lint version >NUL 2>&1 || $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@goose -version >NUL 2>&1 || $(GO) install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
+else
+	@command -v golangci-lint >/dev/null 2>&1 || $(GO) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	@command -v goose >/dev/null 2>&1 || $(GO) install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
+endif
 
 run:
 	$(GO) run ./cmd/bot
@@ -16,15 +39,42 @@ test:
 test-race:
 	$(GO) test -race ./...
 
+test-coverage:
+	$(GO) test -coverpkg=./internal/service -coverprofile=coverage.out ./internal/service ./internal/repository/sqlite ./internal/bot
+	$(GO) tool cover -func=coverage.out
+
 lint: fmt
 	$(GO) vet ./...
 	golangci-lint run
 
 fmt:
-	gofmt -s -w .
+	gofmt -s -w cmd internal migrations
 
 build:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o $(BIN) ./cmd/bot
+ifeq ($(OS),Windows_NT)
+	set "CGO_ENABLED=0"&& $(GO) build -trimpath -ldflags="-s -w" -o "$(BIN)" ./cmd/bot
+else
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o "$(BIN)" ./cmd/bot
+endif
 
 migrate:
-	goose -dir migrations sqlite3 "$(DB_PATH)" up
+ifeq ($(OS),Windows_NT)
+	$(if $(DB_PATH),set "DB_PATH=$(DB_PATH)"&& )$(GO) run ./cmd/migrate
+else
+	$(if $(DB_PATH),DB_PATH="$(DB_PATH)" )$(GO) run ./cmd/migrate
+endif
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d --build
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f bot
+
+docker-check:
+	docker compose config --quiet

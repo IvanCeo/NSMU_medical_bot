@@ -1,0 +1,11 @@
+.git
+.env
+.env.*
+.cache
+bin
+data
+*.db
+*.db-shm
+*.db-wal
+**/*_test.go
+coverage.out

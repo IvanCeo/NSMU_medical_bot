@@ -64,7 +64,7 @@ Rules:
 - Interfaces are defined in the consumer package (service), not in repository.
 - No direct Telegram API calls outside internal/bot.
 - No SQL outside internal/repository and migrations/.
-- Migrations are embedded via embed.FS and applied with goose.Up at startup.
+- Migrations are embedded via embed.FS and applied with a goose.Provider Up(ctx) at startup.
 
 ---
 
@@ -119,7 +119,7 @@ Phase gates (hard rules):
 ## 6. Database
 
 - Schema is defined only by migrations/ (goose). No CREATE TABLE in code.
-- Every migration has .up.sql and .down.sql.
+- Every migration is one NNNN_name.sql file with goose Up and Down sections.
 - Naming: snake_case, plural table names (assignments, users).
 - Foreign keys enabled on every connection (PRAGMA foreign_keys = ON).
 - Timestamps: TEXT in RFC3339 UTC. Pick once, stay consistent.
@@ -163,7 +163,7 @@ Phase gates (hard rules):
 
 [ ] gofmt -s -l . clean, go vet ./... clean, golangci-lint run clean
 [ ] Tests added/updated; all pass; any skipped test is reported
-[ ] Migration added for any schema change (up + down)
+[ ] Migration added for any schema change (goose Up + Down sections)
 [ ] Contracts touched were approved by Lead (human gate)
 [ ] Docs updated: README.md, ARCHITECTURE.md, docs/adr/ if a decision changed
 [ ] No secrets in diff
