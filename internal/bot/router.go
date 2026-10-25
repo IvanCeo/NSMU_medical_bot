@@ -39,10 +39,17 @@ func NewMVP(client UI, cases Cases, tz *time.Location, logger *slog.Logger) *Bot
 	return b
 }
 
-func (r *Router) Handle(ctx context.Context, update tg.Update) error {
+func (r *Router) Handle(ctx context.Context, update tg.Update) (err error) {
 	if update.CallbackQuery != nil {
 		return r.callback(ctx, update.CallbackQuery)
 	}
+	defer func() {
+		actor := int64(0)
+		if update.Message != nil && update.Message.From != nil {
+			actor = update.Message.From.ID
+		}
+		r.logFailure(ctx, "message_failed", "message", actor, err)
+	}()
 	m := update.Message
 	if m == nil || m.Chat == nil || m.From == nil || m.From.IsBot {
 		return nil
@@ -79,7 +86,7 @@ func (r *Router) Handle(ctx context.Context, update tg.Update) error {
 	} else if m.Text != "" {
 		in.Text = &m.Text
 	} else {
-		return r.ui.Show(ctx, actor, 0, "Нужен текст, документ или фотография.", nil)
+		return r.show(ctx, actor, 0, "Нужен текст, документ или фотография. /cancel — отмена.", nil)
 	}
 	view, e := r.cases.Apply(ctx, actor, d.ID, d.Revision, in)
 	if e != nil {
@@ -173,10 +180,8 @@ func (r *Router) respondError(ctx context.Context, chat int64, err error) error 
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if errors.Is(err, domain.ErrStorage) {
-		r.logger.ErrorContext(ctx, "Operation failed", "event", "handler_failed")
-	}
-	return r.ui.Show(ctx, chat, 0, errorText(err), nil)
+	r.logFailure(ctx, "handler_failed", "operation", chat, err)
+	return r.ui.Show(ctx, chat, 0, navigationText(chat, errorText(err)), nil)
 }
 
 func errorText(err error) string {
@@ -207,12 +212,24 @@ func positiveID(v string) (int64, error) {
 }
 
 func (r *Router) callback(ctx context.Context, q *tg.CallbackQuery) (err error) {
+	notice := ""
 	defer func() {
-		text := ""
+		text := notice
 		if err != nil {
 			text = errorText(err)
 		}
-		err = r.ui.Answer(ctx, q.ID, text)
+		actor := int64(0)
+		if q.From != nil {
+			actor = q.From.ID
+		}
+		action := callbackAction(q.Data)
+		r.logFailure(ctx, "callback_failed", action, actor, err)
+		answerErr := r.ui.Answer(ctx, q.ID, text)
+		r.logFailure(ctx, "callback_answer_failed", action, actor, answerErr)
+		if expectedError(err) {
+			err = nil
+		}
+		err = errors.Join(err, answerErr)
 	}()
 	if q.From == nil || q.From.IsBot || q.Message == nil || q.Message.Chat == nil || !q.Message.Chat.IsPrivate() || q.Message.Chat.ID != q.From.ID {
 		return domain.ErrForbidden
@@ -224,6 +241,7 @@ func (r *Router) callback(ctx context.Context, q *tg.CallbackQuery) (err error) 
 	if _, e := r.cases.Register(ctx, domain.TelegramUser{TelegramID: actor, DisplayName: strings.TrimSpace(q.From.FirstName + " " + q.From.LastName)}); e != nil {
 		return e
 	}
+	ctx = navigationContext(ctx, q.Message.Chat.ID, q.Message.MessageID)
 	p := strings.Split(q.Data, ":")
 	switch p[0] {
 	case "menu":
@@ -238,7 +256,8 @@ func (r *Router) callback(ctx context.Context, q *tg.CallbackQuery) (err error) 
 	case "view":
 		return r.callbackView(ctx, actor, p)
 	case "done", "undo", "snooze":
-		return r.callbackDone(ctx, q, actor, p)
+		notice, err = r.callbackDone(ctx, q, actor, p)
+		return err
 	case "dlg":
 		return r.callbackDlg(ctx, actor, p)
 	default:
@@ -248,6 +267,11 @@ func (r *Router) callback(ctx context.Context, q *tg.CallbackQuery) (err error) 
 
 func (r *Router) commandStart(ctx context.Context, actor int64, args string) error {
 	var e error
+	if args == "" {
+		if e := r.cases.Cancel(ctx, actor); e != nil {
+			return r.respondError(ctx, actor, e)
+		}
+	}
 	if strings.HasPrefix(args, "join_") {
 		_, e = r.cases.JoinGroup(ctx, actor, strings.TrimPrefix(args, "join_"))
 		if e != nil {
@@ -302,28 +326,29 @@ func (r *Router) callbackMenu(ctx context.Context, actor int64, p []string) (err
 
 }
 
-func (r *Router) callbackDone(ctx context.Context, q *tg.CallbackQuery, actor int64, p []string) (err error) {
+func (r *Router) callbackDone(ctx context.Context, q *tg.CallbackQuery, actor int64, p []string) (string, error) {
 	if (p[0] == "snooze" && (len(p) != 4 || p[3] != "3h")) || (p[0] != "snooze" && len(p) != 3) {
-		return domain.ErrInvalidInput
+		return "", domain.ErrInvalidInput
 	}
 	id, e := positiveID(p[1])
 	if e != nil {
-		return e
+		return "", e
 	}
 	v, e := positiveID(p[2])
 	if e != nil {
-		return e
+		return "", e
 	}
 	if p[0] == "snooze" {
 		if e := r.cases.Snooze(ctx, actor, id, v, 3*time.Hour); e != nil {
-			return e
+			return "", e
 		}
+		return "Напомню через 3 часа; тихие часы учитываются.", nil
 	} else {
 		if _, e := r.cases.SetComplete(ctx, actor, id, v, p[0] == "done"); e != nil {
-			return e
+			return "", e
 		}
 	}
-	return r.showTask(ctx, actor, id, q.Message.MessageID, false)
+	return "", r.showTask(ctx, actor, id, q.Message.MessageID, false)
 }
 
 func (r *Router) callbackDlg(ctx context.Context, actor int64, p []string) (err error) {

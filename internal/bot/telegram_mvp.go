@@ -11,7 +11,7 @@ import (
 )
 
 func keyboard(rows [][]Button) tg.InlineKeyboardMarkup {
-	out := tg.InlineKeyboardMarkup{}
+	out := tg.InlineKeyboardMarkup{InlineKeyboard: make([][]tg.InlineKeyboardButton, 0, len(rows))}
 	for _, row := range rows {
 		var buttons []tg.InlineKeyboardButton
 		for _, b := range row {
@@ -32,10 +32,9 @@ func (t *Telegram) Show(ctx context.Context, chat int64, messageID int, text str
 	var request tg.Chattable
 	if messageID > 0 {
 		v := tg.NewEditMessageText(chat, messageID, text)
-		if len(buttons) > 0 {
-			k := keyboard(buttons)
-			v.ReplyMarkup = &k
-		}
+		v.DisableWebPagePreview = true
+		k := keyboard(buttons)
+		v.ReplyMarkup = &k
 		request = v
 	} else {
 		v := tg.NewMessage(chat, text)
@@ -47,7 +46,12 @@ func (t *Telegram) Show(ctx context.Context, chat int64, messageID int, text str
 	}
 	_, e := t.scoped(ctx).Send(request)
 	if e != nil {
-		return safeError(ctx, e)
+		safe := safeError(ctx, e)
+		var failure *requestError
+		if messageID > 0 && errors.As(safe, &failure) && failure.reason == "message_not_modified" {
+			return nil
+		}
+		return safe
 	}
 	return nil
 }

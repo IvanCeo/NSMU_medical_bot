@@ -27,7 +27,7 @@ func (r *Router) menu(ctx context.Context, id int64, text string) error {
 	if p.User.Role == domain.Editor || p.User.Role == domain.Admin {
 		text += "\n/add — новое задание; /edit — изменить; /cancel_task — отменить; /subjects manage — предметы."
 	}
-	return r.ui.Show(ctx, id, 0, text, buttons)
+	return r.show(ctx, id, 0, text, buttons)
 }
 func (r *Router) help(ctx context.Context, id int64) error {
 	text := "/start — меню\n/profile — профиль\n/join [код] — вступить в группу\n/leave — выйти с подтверждением\n/tasks — задания и сроки\n/subjects — предметы\n/settings — напоминания и тихие часы\n/cancel — отменить диалог\n\nНапоминания приходят лично. В группе публикуется только ежедневный дайджест. Время отображается в " + r.tz.String() + ".\nНе отправляй данные пациентов."
@@ -42,7 +42,7 @@ func (r *Router) help(ctx context.Context, id int64) error {
 		text += "\n/admin — группы, приглашения, редакторы и журнал\n/tasks ID_группы [day/week/all/overdue] [all/pending/done] — задания выбранной группы\n/subjects ID_группы — её предметы\n/bind ID — привязать учебную группу из её чата (нужны права администратора чата у тебя и бота)"
 	}
 	text += "\n/tasks [day/week/all/overdue] [all/pending/done] — фильтры периода и выполнения"
-	return r.ui.Show(ctx, id, 0, text, nil)
+	return r.show(ctx, id, 0, text, nil)
 }
 func (r *Router) showProfile(ctx context.Context, id int64) error {
 	p, e := r.cases.Profile(ctx, id)
@@ -54,7 +54,7 @@ func (r *Router) showProfile(ctx context.Context, id int64) error {
 		group = p.Group.Title
 	}
 	text := fmt.Sprintf("%s\nTelegram ID: %d\nРоль: %s\nГруппа: %s\n%s", p.User.DisplayName, p.User.TelegramID, label(string(p.User.Role)), group, preferencesText(p.Preferences))
-	return r.ui.Show(ctx, id, 0, text, nil)
+	return r.show(ctx, id, 0, text, nil)
 }
 func preferencesText(p domain.Preferences) string {
 	state := "выключены"
@@ -137,7 +137,7 @@ func (r *Router) taskPage(ctx context.Context, id int64, f domain.AssignmentFilt
 	if f.GroupID == 0 {
 		rows = append(rows, []Button{{Text: "Сегодня", Data: "tasks:day:0"}, {Text: "7 дней", Data: "tasks:week:0"}}, []Button{{Text: "Все", Data: "tasks:all:0"}, {Text: "Просроченные", Data: "tasks:overdue:0"}})
 	}
-	return p.NextCursor, r.ui.Show(ctx, id, 0, text, rows)
+	return p.NextCursor, r.show(ctx, id, 0, text, rows)
 }
 func (r *Router) showSubjects(ctx context.Context, id int64, cursor string, gid int64) error {
 	for {
@@ -153,7 +153,7 @@ func (r *Router) showSubjects(ctx context.Context, id int64, cursor string, gid 
 		if len(rows) == 0 {
 			text += "\nПока пусто."
 		}
-		if e := r.ui.Show(ctx, id, 0, text, rows); e != nil {
+		if e := r.show(ctx, id, 0, text, rows); e != nil {
 			return e
 		}
 		if p.NextCursor == "" {
@@ -216,13 +216,14 @@ func (r *Router) showTask(ctx context.Context, actor, id int64, editID int, file
 			rows = append(rows, []Button{{Text: "Напомнить через 3 часа", Data: fmt.Sprintf("snooze:%d:%d:3h", id, v.Version)}})
 		}
 	}
+	rows = append(rows, []Button{{Text: "← Задания предмета", Data: fmt.Sprintf("subject:%d:0", v.SubjectID)}})
 	parts := splitText(text, 3500)
-	if e := r.ui.Show(ctx, actor, editID, parts[0], rows); e != nil {
+	if e := r.show(ctx, actor, editID, parts[0], rows); e != nil {
 		return e
 	}
 	if editID == 0 {
 		for _, part := range parts[1:] {
-			if e := r.ui.Show(ctx, actor, 0, part, nil); e != nil {
+			if e := r.show(ctx, actor, 0, part, nil); e != nil {
 				return e
 			}
 		}
@@ -309,6 +310,9 @@ func (r *Router) showDialog(ctx context.Context, id int64, v domain.DialogView) 
 	if v.Step == "admin_digest" && v.Preview == "" {
 		text += "\nСегодня дедлайнов нет."
 	}
+	if !strings.Contains(text, "/cancel") {
+		text += "\n\n/cancel — отмена диалога"
+	}
 	var rows [][]Button
 	for _, o := range v.Options {
 		data := fmt.Sprintf("dlg:%d:%d:%s", v.ID, v.Revision, o.Value)
@@ -323,7 +327,7 @@ func (r *Router) showDialog(ctx context.Context, id int64, v domain.DialogView) 
 		if i == len(parts)-1 {
 			buttons = rows
 		}
-		if e := r.ui.Show(ctx, id, 0, part, buttons); e != nil {
+		if e := r.show(ctx, id, 0, part, buttons); e != nil {
 			return e
 		}
 	}

@@ -59,14 +59,26 @@ func (b *Bot) Run(ctx context.Context) error {
 			}
 			if err := b.handle(ctx, update); err != nil {
 				if fatal(err) {
+					if b.router != nil {
+						return fatalTelegramError(err)
+					}
 					return err
 				}
-				b.logger.ErrorContext(ctx, "Telegram reply failed", "event", "reply_failed", "err", err)
+				if b.router == nil {
+					b.logger.ErrorContext(ctx, "Telegram reply failed", "event", "reply_failed", "err", err)
+				}
 			}
 			offset = max(offset, update.UpdateID+1)
 		}
 	}
 	return nil
+}
+
+func fatalTelegramError(err error) error {
+	if errors.Is(err, domain.ErrTelegramUnauthorized) {
+		return fmt.Errorf("handle Telegram: %w", domain.ErrTelegramUnauthorized)
+	}
+	return fmt.Errorf("handle Telegram: %w", domain.ErrTelegramConflict)
 }
 
 func (b *Bot) handle(ctx context.Context, update tgbotapi.Update) error {

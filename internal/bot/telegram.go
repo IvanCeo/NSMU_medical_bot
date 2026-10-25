@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -75,10 +76,11 @@ type requestError struct {
 	code       int
 	retryAfter time.Duration
 	kind       error
+	reason     string
 }
 
 func (e *requestError) Error() string {
-	return fmt.Sprintf("Telegram request failed (code %d): %v", e.code, e.kind)
+	return fmt.Sprintf("Telegram request failed (code %d, reason %s): %v", e.code, e.reason, e.kind)
 }
 
 func (e *requestError) Unwrap() error {
@@ -98,8 +100,23 @@ func safeError(ctx context.Context, err error) error {
 		case http.StatusConflict:
 			kind = domain.ErrTelegramConflict
 		}
-		return &requestError{response.Code, time.Duration(response.RetryAfter) * time.Second, kind}
+		return &requestError{code: response.Code, retryAfter: time.Duration(response.RetryAfter) * time.Second, kind: kind, reason: telegramReason(response)}
 	}
 	// HTTP errors include the request URL, which contains the token.
 	return fmt.Errorf("Telegram request failed: %w", kind)
+}
+
+func telegramReason(response *tgbotapi.Error) string {
+	message := strings.TrimPrefix(response.Message, "Bad Request: ")
+	if response.Code == http.StatusBadRequest {
+		if message == "message is not modified" || strings.HasPrefix(message, "message is not modified: ") {
+			return "message_not_modified"
+		}
+		for description, reason := range map[string]string{"message to edit not found": "message_not_found", "message can't be edited": "message_not_editable", "BUTTON_DATA_INVALID": "invalid_button_data"} {
+			if message == description {
+				return reason
+			}
+		}
+	}
+	return "request_failed"
 }

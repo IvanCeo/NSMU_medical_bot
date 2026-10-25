@@ -149,6 +149,19 @@ func TestMVP_TelegramFullWorkflow(t *testing.T) {
 	}
 	callback(3, "undo:1:1")
 	callback(3, "snooze:1:1:3h")
+	due, e := sqlite.NewStore(db).Repositories().Reminders.Due(ctx, now.Add(3*time.Hour), 10)
+	if e != nil {
+		t.Fatal(e)
+	}
+	snoozed := false
+	for _, rem := range due {
+		if rem.AssignmentID == 1 && rem.Source == domain.Snoozed {
+			snoozed = true
+		}
+	}
+	if !snoozed {
+		t.Fatal("snooze confirmation without durable reminder")
+	}
 	message(3, "/profile")
 	if !strings.Contains(ui.last().text, "Test cohort") {
 		t.Fatal("profile missing group")
@@ -160,6 +173,15 @@ func TestMVP_TelegramFullWorkflow(t *testing.T) {
 	choose(3, "quiet_off")
 	message(3, "/cancel")
 	message(3, "/help")
+	message(3, "/settings")
+	message(3, "/start")
+	current, e := app.Current(ctx, 3)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if current != nil {
+		t.Fatal("main menu retained a hidden active dialog")
+	}
 	message(3, "/leave")
 	choose(3, "confirm")
 	message(3, "/join")
@@ -210,7 +232,7 @@ func TestMVP_TelegramFullWorkflow(t *testing.T) {
 }
 func TestMVP_CallbackAndTextLimits(t *testing.T) {
 	ui := &recordingUI{}
-	r := &Router{ui: ui}
+	r := &Router{ui: ui, logger: discardLogger()}
 	for _, q := range []*tg.CallbackQuery{{ID: "inline"}, {ID: "group", From: &tg.User{ID: 1}, Message: &tg.Message{Chat: &tg.Chat{ID: -100, Type: "group"}}}, {ID: "foreign", From: &tg.User{ID: 1}, Message: &tg.Message{Chat: &tg.Chat{ID: 2, Type: "private"}}}, {ID: "oversized", From: &tg.User{ID: 1}, Message: &tg.Message{Chat: &tg.Chat{ID: 1, Type: "private"}}, Data: strings.Repeat("x", 65)}} {
 		if e := r.callback(t.Context(), q); e != nil {
 			t.Fatal(e)
