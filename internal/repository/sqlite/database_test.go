@@ -42,10 +42,8 @@ func TestMigrate_UpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
-		if _, err := provider.Down(t.Context()); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := provider.DownTo(t.Context(), 0); err != nil {
+		t.Fatal(err)
 	}
 	var count int
 	if err := db.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('users', 'groups')").Scan(&count); err != nil || count != 0 {

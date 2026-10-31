@@ -138,6 +138,12 @@ func (s *App) cancelUser(ctx context.Context, r Repositories, uid int64, aid *in
 	}
 	return r.Deliveries.CancelForUser(ctx, uid, aid, s.now())
 }
+func (s *App) cancelUserReminders(ctx context.Context, r Repositories, uid int64, aid *int64) error {
+	if e := r.Reminders.CancelForUser(ctx, uid, aid, s.now()); e != nil {
+		return e
+	}
+	return r.Deliveries.CancelRemindersForUser(ctx, uid, aid, s.now())
+}
 func (s *App) Register(ctx context.Context, t domain.TelegramUser) (domain.User, error) {
 	var u domain.User
 	if t.TelegramID <= 0 || utf8.RuneCountInString(t.DisplayName) > 256 {
@@ -260,7 +266,11 @@ func (s *App) savePreferences(ctx context.Context, r Repositories, u domain.User
 	if e := r.Settings.Save(ctx, u.ID, p); e != nil {
 		return e
 	}
-	if e := s.cancelUser(ctx, r, u.ID, nil); e != nil {
+	cancel := s.cancelUser
+	if p.RemindersEnabled {
+		cancel = s.cancelUserReminders
+	}
+	if e := cancel(ctx, r, u.ID, nil); e != nil {
 		return e
 	}
 	if p.RemindersEnabled && u.GroupID != nil {

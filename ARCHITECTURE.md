@@ -38,6 +38,8 @@ flowchart LR
 - config: чтение optional .env, приоритет окружения, валидация без сетевых вызовов.
 - cmd/bot: конфигурация, миграции, seed admin, сборка зависимостей и shutdown.
 - cmd/migrate: применение той же схемы без Telegram и синхронизации ролей.
+- cmd/backup, internal/backup: файловый архив остановленного бота, проверка
+  и восстановление в новый пустой volume; без SQLite и Telegram.
 
 SQL находится только в repository и migrations, Telegram SDK — только в bot.
 Интерфейсы и доменные типы не содержат SDK/sql-типов. Нет глобального клиента
@@ -47,7 +49,8 @@ UnitOfWork, отправителя и проверку прав чата.
 ## 3. Контракты и права
 
 Полные сигнатуры: [docs/contracts/mvp.md](docs/contracts/mvp.md) и
-internal/service/interfaces.go. Их изменения проходят Lead и human approval.
+[assignment-rules.md](docs/contracts/assignment-rules.md), internal/service/interfaces.go.
+Их изменения проходят Lead и human approval.
 
 Роли: student читает задания своей группы и управляет своими отметками;
 editor меняет предметы и задания своей группы; admin глобально управляет
@@ -81,7 +84,10 @@ Snooze подтверждается через answerCallbackQuery без пов
 
 ## 4. Модель данных и горячие запросы
 
-Схема: 0001_identity (не изменялась), 0002_learning, 0003_notifications.
+Схема: 0001_identity, 0002_learning, 0003_notifications, 0004_assignment_notifications.
+Миграции 0001–0003 не изменялись. 0004 пересоздаёт outbox с копированием всех
+18 прежних полей и добавлением nullable assignment_id; Down отказывается при
+наличии assignment_created.
 [docs/database.md](docs/database.md) описывает поля, ограничения, ER-диаграмму
 и назначение каждого индекса. Прикладные timestamps — RFC3339 UTC TEXT,
 local_date — календарная дата в TZ. WAL, foreign_keys=ON, busy_timeout=5000
@@ -92,11 +98,13 @@ local_date — календарная дата в TZ. WAL, foreign_keys=ON, busy
 attachments(assignment_id), reminders(send_at) с частичным условием ожидания,
 reminders(user_id,assignment_id), outbox(status,next_attempt_at),
 outbox(lease_until) WHERE processing, outbox(user_id,reminder_id),
-outbox(digest_run_id), dialog_states(user_id)/expires_at WHERE active,
+outbox(digest_run_id), outbox(assignment_id) WHERE assignment_created и
+outbox(reminder_id) WHERE reminder — адресная отмена личных уведомлений,
+dialog_states(user_id)/expires_at WHERE active,
 audit_log(group_id,at,id). Keyset-пагинация заданий по времени и ID.
 
-Связанные записи изменяются через одну UnitOfWork: публикация задания и
-напоминаний, завершение мастера, отмена очереди, личные отметки и аудит.
+Связанные записи изменяются через одну UnitOfWork: публикация задания,
+напоминаний и assignment_created, завершение мастера, отмена очереди, личные отметки и аудит.
 Транзакция не содержит HTTP и не допускает вложенного входа. Сохранение
 subject/group/assignment и шага диалога проверяет expected version/revision.
 
@@ -114,8 +122,8 @@ subject/group/assignment и шага диалога проверяет expected 
 
 /add → выбор группы при необходимости → предмет → вид → заголовок → описание
 → будущий дедлайн в TZ → важность → URL → до десяти документов/фотографий →
-preview → подтверждение. До подтверждения есть только черновик. Создание не
-делает массовую рассылку. /edit проверяет исходную версию; /cancel_task
+preview → подтверждение. До подтверждения есть только черновик. Публикация
+ставит в очередь личное оповещение текущим участникам. /edit проверяет исходную версию; /cancel_task
 сохраняет историю. Архивирование предмета скрывает его из нового выбора.
 
 Мастер хранится в dialog_states: один active на пользователя, TTL 30 минут,
@@ -127,12 +135,31 @@ preview → подтверждение. До подтверждения есть
 Вложения пересылаются по file_id без загрузки на сервер. Тексты интерфейса
 формируются в bot из типизированных результатов сервиса.
 
+Пользовательский список «Все» (в том числе предмет и пустой Period) ограничен
+deadline_at>now и личным pending. Границы заново задаёт service, SQL применяет
+их до LIMIT. Остальные периоды сохраняют явные фильтры, all+done недопустим.
+История хранится; undo возвращает будущее задание, чужой done на список не влияет.
+Подпись кнопки — тема с нормализованными пробелами до 60 Unicode-символов,
+при совпадении сокращённых тем добавляется ID. Callback/deep link прежние.
+
 ## 6. Scheduler и очередь
 
 Планирование при старте и раз в 15 секунд: due reminders и сегодняшний digest.
 Один worker постоянно захватывает по одной outbox-записи; при пустой очереди
 ждёт до секунды. Просроченные мастера завершаются при старте и раз в минуту.
 Все циклы и ожидания прекращаются через context.
+
+assignment_created создаётся только при публикации вместе с заданием, аудитом
+и планами reminder. Event key assignment_created:<assignmentID>:<userID>.
+Получатели фиксируются по текущему членству, доступному личному чату и включённым
+уведомлениям, включая автора при членстве. После тихих часов событие перепроверяет
+членство, done, active, срок и настройки. Текст показывает актуальные предмет,
+тему и дедлайн; изменение version не отменяет событие. Редактирование и смена
+включённых настроек отменяют только reminder, сохраняя событие публикации.
+Done/отмена/выход/off/403 отменяют оба личных типа. Undo/join/enable/register
+не восстанавливают старые события. Миграция не создаёт события старым заданиям.
+Срок жизни события ограничен первоначальным дедлайном и актуальным сроком.
+Настройка reminders_enabled управляет обоими типами; UI — «Личные уведомления».
 
 Напоминания — только лично. Будущие интервалы берутся из REMINDER_OFFSETS;
 создание, вступление, undo и включение настроек не догоняют уже прошедшие.
@@ -182,7 +209,12 @@ Callback отдельно учитывает callback_failed и callback_answer_
 
 Docker Compose для локального запуска собирает один multi-stage образ,
 distroless nonroot 65532, /data в постоянном volume, без входящих портов.
-Shell в runtime нет. Production registry pull, backup и rollout выполняются
+Shell в runtime нет. Тот же образ содержит /app/backup; одноразовый сервис backup
+под профилем maintenance подключает data только для чтения и ./backups для записи,
+без сети и токена. Оператор останавливает бот на время копирования. Restore
+допускает только пустой каталог нового volume и выставляет UID/GID 65532.
+Production Compose-пример без build: docs/deployment/compose.yaml; инструкция
+копирования и восстановления — docs/backup.md. Production registry pull, backup и rollout выполняются
 оператором вне агентской сессии; production Compose не изменяется.
 CI/deploy-автоматизация в репозиторий не добавляется.
 
@@ -197,6 +229,8 @@ snooze, отмена, retry_after, блокировка, lease fencing, част
 считает совокупное покрытие internal/service всеми этими тестами (>=70%).
 
 Решения: [ADR-0007](docs/adr/0007-sqlite-bootstrap.md) — SQLite bootstrap и
-упаковка; [ADR-0008](docs/adr/0008-mvp-dialogs-and-delivery.md) — MVP и доставка.
+упаковка; [ADR-0008](docs/adr/0008-mvp-dialogs-and-delivery.md) — MVP и доставка;
+[ADR-0010](docs/adr/0010-assignment-notifications-and-backup.md) — события публикации,
+совместимая миграция и служебный backup в образе.
 Исторические обозначения ADR-0001–0006 отдельными файлами пока не оформлены.
 Новые изменения контрактов требуют плана и human approval; ADR append-only.

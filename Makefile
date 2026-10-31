@@ -5,11 +5,13 @@ GOOSE_VERSION ?= v3.26.0
 ifeq ($(OS),Windows_NT)
 SHELL := cmd.exe
 BIN ?= bin/bot.exe
+BACKUP_BIN ?= bin/backup.exe
 else
 BIN ?= bin/bot
+BACKUP_BIN ?= bin/backup
 endif
 
-.PHONY: setup env tools run test test-race lint fmt build migrate test-coverage docker-build docker-up docker-down docker-logs docker-check
+.PHONY: setup env tools run test test-race lint fmt build build-backup migrate test-coverage docker-build docker-up docker-down docker-logs docker-check backup
 
 setup: env tools
 	$(GO) mod download
@@ -64,6 +66,13 @@ else
 	$(if $(DB_PATH),DB_PATH="$(DB_PATH)" )$(GO) run ./cmd/migrate
 endif
 
+build-backup:
+ifeq ($(OS),Windows_NT)
+	set "CGO_ENABLED=0"&& $(GO) build -trimpath -ldflags="-s -w" -o "$(BACKUP_BIN)" ./cmd/backup
+else
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags="-s -w" -o "$(BACKUP_BIN)" ./cmd/backup
+endif
+
 docker-build:
 	docker compose build
 
@@ -78,3 +87,7 @@ docker-logs:
 
 docker-check:
 	docker compose config --quiet
+
+# Local only: stop the bot first; start it separately after the copy.
+backup:
+	docker compose run --rm --no-deps backup

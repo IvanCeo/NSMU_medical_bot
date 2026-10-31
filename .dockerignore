@@ -4,6 +4,7 @@
 .cache
 bin
 data
+backups
 *.db
 *.db-shm
 *.db-wal

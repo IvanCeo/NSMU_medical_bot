@@ -160,6 +160,12 @@ func (s *App) outgoing(ctx context.Context, r Repositories, d domain.Delivery, n
 	if d.Kind == domain.ReminderDelivery {
 		return s.reminderMessage(ctx, r, d, g, now)
 	}
+	if d.Kind == domain.AssignmentCreatedDelivery {
+		return s.assignmentCreatedMessage(ctx, r, d, now)
+	}
+	if d.Kind != domain.DigestDelivery {
+		return nil, nil
+	}
 	if !g.DigestEnabled || g.TelegramChatID == nil || g.ChatBindingVersion != d.Payload.BindingVersion || now.In(s.tz).Format(time.DateOnly) != d.Payload.LocalDate {
 		return nil, nil
 	}
@@ -173,7 +179,7 @@ func (s *App) outgoing(ctx context.Context, r Repositories, d domain.Delivery, n
 			continue
 		}
 		msg.Text += fmt.Sprintf("\n%s · #%d %s", a.DeadlineAt.In(s.tz).Format("15:04"), a.ID, a.Title)
-		msg.Buttons = append(msg.Buttons, domain.OutgoingButton{Label: "open_task", AssignmentID: id})
+		msg.Buttons = append(msg.Buttons, domain.OutgoingButton{Label: a.Title, AssignmentID: id})
 	}
 	if len(msg.Buttons) == 0 {
 		return nil, nil
@@ -240,7 +246,7 @@ func (s *App) reminderMessage(ctx context.Context, r Repositories, d domain.Deli
 		}
 		return nil, nil
 	}
-	msg := &domain.Outgoing{ChatID: u.TelegramID, Kind: "private", Text: fmt.Sprintf("%s\n#%d %s\n%s", g.Title, a.ID, a.Title, a.DeadlineAt.In(s.tz).Format("02.01.2006 15:04")), Buttons: []domain.OutgoingButton{{Label: "open_task", AssignmentID: a.ID}}}
+	msg := &domain.Outgoing{ChatID: u.TelegramID, Kind: "private", EventKind: d.Kind, Text: fmt.Sprintf("%s\n#%d %s\n%s", g.Title, a.ID, a.Title, a.DeadlineAt.In(s.tz).Format("02.01.2006 15:04")), Buttons: []domain.OutgoingButton{{Label: a.Title, AssignmentID: a.ID}}}
 	return msg, nil
 }
 
@@ -267,12 +273,13 @@ func (s *App) deliveryFailed(ctx context.Context, r Repositories, d domain.Deliv
 		f = *detail
 	}
 	if f.Code == "403" && d.UserID != nil {
+		if e := s.finishDelivery(ctx, r, d, domain.Failed, f.Code, at); e != nil {
+			return e
+		}
 		if e := r.Users.SetPrivateChatAvailable(ctx, *d.UserID, false); e != nil {
 			return e
 		}
-		if e := r.Reminders.CancelForUser(ctx, *d.UserID, nil, at); e != nil {
-			return e
-		}
+		return s.cancelUser(ctx, r, *d.UserID, nil)
 	}
 	if f.Permanent || d.Attempts >= 5 {
 		return s.finishDelivery(ctx, r, d, domain.Failed, f.Code, at)

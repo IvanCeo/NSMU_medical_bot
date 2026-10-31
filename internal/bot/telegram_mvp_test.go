@@ -40,6 +40,11 @@ func TestTelegram_MVPRequestsAndSafeDeliveryErrors(t *testing.T) {
 			if r.FormValue("chat_id") == "-100" && !strings.Contains(r.FormValue("reply_markup"), "start=task_42") {
 				t.Error("digest deep link missing")
 			}
+			if strings.Contains(r.FormValue("text"), "Creation topic") {
+				if !strings.HasPrefix(r.FormValue("text"), "Новое задание\n") || !strings.Contains(r.FormValue("reply_markup"), "Creation topic") || !strings.Contains(r.FormValue("reply_markup"), "view:42") {
+					t.Error("creation notice prefix, topic or callback missing")
+				}
+			}
 		}
 		if _, e := io.WriteString(w, reply); e != nil {
 			t.Error(e)
@@ -74,6 +79,11 @@ func TestTelegram_MVPRequestsAndSafeDeliveryErrors(t *testing.T) {
 	}
 	receipt, e := client.SendNotification(t.Context(), domain.Outgoing{ChatID: -100, Kind: "group", Text: "Digest", Buttons: []domain.OutgoingButton{{Label: "Task", AssignmentID: 42}}})
 	if e != nil || receipt.MessageID != 7 {
+		t.Fatal(e)
+	}
+	reset()
+	_, e = client.SendNotification(t.Context(), domain.Outgoing{ChatID: 1, Kind: "private", EventKind: domain.AssignmentCreatedDelivery, Text: "Creation topic", Buttons: []domain.OutgoingButton{{Label: "Creation topic", AssignmentID: 42}}})
+	if e != nil {
 		t.Fatal(e)
 	}
 	reset()

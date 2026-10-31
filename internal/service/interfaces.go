@@ -126,6 +126,8 @@ type DeliveryRepo interface {
 	Retry(ctx context.Context, id int64, token string, failure domain.DeliveryFailure, nextAt time.Time) error
 	Fail(ctx context.Context, id int64, token string, status domain.DeliveryStatus, code string, at time.Time) error
 	CancelForAssignment(ctx context.Context, assignmentID int64, at time.Time) error
+	CancelRemindersForAssignment(ctx context.Context, assignmentID int64, at time.Time) error
+	CancelRemindersForUser(ctx context.Context, userID int64, assignmentID *int64, at time.Time) error
 	CancelForUser(ctx context.Context, userID int64, assignmentID *int64, at time.Time) error
 	CancelForGroup(ctx context.Context, groupID int64, at time.Time) error
 	Expire(ctx context.Context, now time.Time) error

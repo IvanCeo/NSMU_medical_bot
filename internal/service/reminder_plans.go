@@ -105,7 +105,7 @@ func (s *App) replanAssignment(ctx context.Context, r Repositories, a domain.Ass
 		}
 		p.Cursor = list.NextCursor
 	}
-	if e := r.Deliveries.CancelForAssignment(ctx, a.ID, s.now()); e != nil {
+	if e := r.Deliveries.CancelRemindersForAssignment(ctx, a.ID, s.now()); e != nil {
 		return e
 	}
 	return r.Reminders.ReplaceForAssignment(ctx, a.ID, plans, s.now())
