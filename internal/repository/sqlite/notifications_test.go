@@ -22,15 +22,24 @@ func (f *fixture) drain(t *testing.T) {
 	}
 	t.Fatal("outbox did not drain")
 }
+
+// Existing reminder tests start after the publication notification has been delivered.
+func (f *fixture) assignmentBeforeReminderTest(t *testing.T, after time.Duration) domain.Assignment {
+	t.Helper()
+	a := f.assignment(t, after)
+	f.drain(t)
+	f.tg.sent = nil
+	return a
+}
 func TestNotifications_CatchupCoalescingAndDeduplication(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	a := f.assignment(t, 60*time.Hour)
+	a := f.assignmentBeforeReminderTest(t, 60*time.Hour)
 	check(t, f.app.BindChat(ctx, 1, f.group.ID, -100))
 	f.now = a.DeadlineAt.Add(-2 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	check(t, f.app.Plan(ctx, f.now))
-	if n := f.number(t, "SELECT count(*) FROM outbox"); n != 3 {
+	if n := f.number(t, "SELECT count(*) FROM outbox WHERE kind<>'assignment_created'"); n != 3 {
 		t.Fatalf("outbox=%d", n)
 	}
 	f.drain(t)
@@ -63,7 +72,7 @@ func TestNotifications_CatchupCoalescingAndDeduplication(t *testing.T) {
 func TestNotifications_TransientRetryAndPrivateBlock(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	a := f.assignment(t, 26*time.Hour)
+	a := f.assignmentBeforeReminderTest(t, 26*time.Hour)
 	f.now = f.now.Add(3 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	f.tg.failure = &domain.DeliveryFailure{Code: "429", RetryAfter: time.Minute}
@@ -96,7 +105,7 @@ func TestNotifications_TransientRetryAndPrivateBlock(t *testing.T) {
 func TestNotifications_QuietCatchupAndDeadlineSkip(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	a := f.assignment(t, 36*time.Hour)
+	a := f.assignmentBeforeReminderTest(t, 36*time.Hour)
 	check(t, f.app.SavePreferences(ctx, 3, domain.Preferences{RemindersEnabled: true, QuietHours: &domain.QuietHours{Start: "02:00", End: "18:00"}}))
 	f.now = f.now.Add(21 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
@@ -126,7 +135,7 @@ func TestNotifications_QuietCatchupAndDeadlineSkip(t *testing.T) {
 func TestNotifications_SnoozeAndMutationRevalidation(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	a := f.assignment(t, 27*time.Hour)
+	a := f.assignmentBeforeReminderTest(t, 27*time.Hour)
 	f.now = f.now.Add(4 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	check(t, f.app.Snooze(ctx, 3, a.ID, a.Version, 3*time.Hour))
@@ -158,7 +167,7 @@ func TestNotifications_SnoozeAndMutationRevalidation(t *testing.T) {
 func TestNotifications_RetryLimitAndStaleLease(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
-	f.assignment(t, 48*time.Hour)
+	f.assignmentBeforeReminderTest(t, 48*time.Hour)
 	f.now = f.now.Add(25 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	f.tg.failure = &domain.DeliveryFailure{Code: "503"}
@@ -170,7 +179,7 @@ func TestNotifications_RetryLimitAndStaleLease(t *testing.T) {
 		t.Fatalf("failed rows=%d", n)
 	}
 	// Independently exercise lease fencing and recovery on a fresh pending record.
-	f.assignment(t, 48*time.Hour)
+	f.assignmentBeforeReminderTest(t, 48*time.Hour)
 	f.now = f.now.Add(25 * time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	r := f.store.Repositories()
@@ -195,7 +204,7 @@ func TestNotifications_DigestPartsRebindingAndNextDate(t *testing.T) {
 	check(t, f.app.SavePreferences(ctx, 2, domain.Preferences{}))
 	check(t, f.app.SavePreferences(ctx, 3, domain.Preferences{}))
 	for i := 0; i < 18; i++ {
-		f.assignment(t, 10*time.Hour)
+		f.assignmentBeforeReminderTest(t, 10*time.Hour)
 	}
 	check(t, f.app.Plan(ctx, f.now))
 	if n := f.number(t, "SELECT count(*) FROM outbox WHERE kind='digest'"); n != 3 {
@@ -224,8 +233,8 @@ func TestNotifications_DigestRevalidatesCancelledAssignment(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
 	check(t, f.app.BindChat(ctx, 1, f.group.ID, -100))
-	a := f.assignment(t, 10*time.Hour)
-	b := f.assignment(t, 11*time.Hour)
+	a := f.assignmentBeforeReminderTest(t, 10*time.Hour)
+	b := f.assignmentBeforeReminderTest(t, 11*time.Hour)
 	check(t, f.app.Plan(ctx, f.now))
 	check(t, f.app.CancelAssignment(ctx, 2, a.ID, a.Version))
 	f.drain(t)
@@ -270,7 +279,7 @@ func TestNotifications_FractionalConfiguredOffset(t *testing.T) {
 	f := newFixture(t)
 	ctx := t.Context()
 	f.app = service.New(f.store, f.tg, f.tg, service.Options{Now: func() time.Time { return f.now }, ReminderOffsets: []time.Duration{100 * time.Millisecond}})
-	a := f.assignment(t, time.Hour)
+	a := f.assignmentBeforeReminderTest(t, time.Hour)
 	f.now = a.DeadlineAt.Add(-50 * time.Millisecond)
 	due, e := f.store.Repositories().Reminders.Due(ctx, f.now, 10)
 	check(t, e)

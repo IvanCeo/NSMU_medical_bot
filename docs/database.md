@@ -1,8 +1,8 @@
 # Схема базы данных
 
 Реализована миграциями `0001_identity.sql`, `0002_learning.sql`,
-`0003_notifications.sql`. SQL миграций — источник схемы; существующая 0001
-сохранена без изменений. Контракты: [mvp.md](contracts/mvp.md).
+`0003_notifications.sql`, `0004_assignment_notifications.sql`. SQL миграций — источник схемы; 0001–0003
+сохранены без изменений. Контракты: [mvp.md](contracts/mvp.md).
 
 ## Хранение и транзакции
 
@@ -32,6 +32,7 @@ erDiagram
     users ||--o{ settings : preferences
     users ||--o{ dialog_states : dialogs
     groups ||--o{ digest_runs : daily
+    assignments ||--o{ outbox : creation_notice
     reminders ||--o{ outbox : delivery
     digest_runs ||--o{ outbox : parts
     groups ||--o{ audit_log : changes
@@ -51,7 +52,7 @@ erDiagram
 | reminders | id PK, assignment_id FK, user_id FK, assignment_version, source default/snooze, offset_seconds NULL, send_at, sent_at NULL, cancelled_at NULL |
 | dialog_states | id AUTOINCREMENT PK, user_id FK, kind, step, payload_json, revision > 0, status, expires_at, updated_at; не более одного active на пользователя |
 | digest_runs | id PK, group_id FK, local_date, binding_version, status, created_at; UNIQUE(group_id, local_date) |
-| outbox | id PK, event_key UNIQUE, kind reminder/digest, reminder_id NULL FK, digest_run_id NULL FK, group_id FK, user_id NULL FK, part, payload_json, status, attempts, next_attempt_at, expires_at, lease_token NULL, lease_until NULL, sent_at NULL, telegram_message_id NULL, last_error_code NULL |
+| outbox | id PK, event_key UNIQUE, kind reminder/digest/assignment_created, assignment_id NULL FK assignments, reminder_id NULL FK, digest_run_id NULL FK, group_id FK, user_id NULL FK, part, payload_json, status, attempts, next_attempt_at, expires_at, lease_token NULL, lease_until NULL, sent_at NULL, telegram_message_id NULL, last_error_code NULL |
 | audit_log | id PK, group_id NULL FK, actor_id NULL FK, action, entity, entity_id, payload_json, at |
 
 Виды задания: homework/test/exam/practice/other; важность: low/normal/high.
@@ -72,10 +73,24 @@ erDiagram
 
 Состояния outbox: pending/processing/sent/skipped/failed/cancelled. Processing
 обязательно имеет lease_token и lease_until, остальные состояния — NULL.
-У reminder есть reminder_id и user_id, у digest — digest_run_id; CHECK
+У assignment_created есть assignment_id и user_id, part=0, нет reminder_id/digest_run_id.
+У reminder есть reminder_id и user_id, у digest — digest_run_id; assignment_id у них NULL. CHECK
 исключает несовместимые комбинации. Подтверждение записи требует актуального
 токена и ещё действующего lease. В payload — ID заданий, версия и привязка,
 а не готовый текст Telegram. Текст строится из актуальных данных перед отправкой.
+
+assignment_created имеет ключ assignment_created:<assignmentID>:<userID> и один
+ID задания в payload. Создаётся при публикации для текущих доступных участников
+с включёнными уведомлениями; старые задания не заполняются задним числом.
+Правка задания сохраняет ожидающее событие, а done/выход/off/отмена закрывают его.
+Undo/включение/повторное вступление создают только будущие reminder.
+
+Миграция 0004 расширяет CHECK видов и добавляет assignment_id. Новая таблица
+получает **все 18 прежних колонок со всеми значениями**, затем старая удаляется,
+таблица переименовывается и индексы восстанавливаются в одной goose-транзакции.
+У старых событий assignment_id=NULL. Down запрещён, если существуют новые события.
+Перед обновлением оператор делает [копию всего volume](backup.md); восстановление
+использует новый volume, не перезаписывая исходные данные.
 
 Digest run: planning/queued/sent/empty/partial/failed/cancelled. Каждая часть
 имеет отдельный event_key. Итог partial означает, что часть сообщений принята,
@@ -97,6 +112,8 @@ chat_binding_version и отменяет ожидающие части преж�
 - dialog_states(user_id) UNIQUE WHERE active, expires_at WHERE active — мастер и TTL.
 - outbox(status,next_attempt_at), lease_until WHERE processing — доставка и восстановление.
 - outbox(user_id,reminder_id), outbox(digest_run_id) — отмена и прогресс частей.
+- outbox(assignment_id) WHERE assignment_created, outbox(reminder_id) WHERE reminder —
+  отмена публикации/перепланирование без потери другого типа личного уведомления.
 - audit_log(group_id,at,id) — история группы.
 
 Списки используют ограниченный курсор и страницы до 20 записей. Курсор заданий

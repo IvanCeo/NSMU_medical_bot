@@ -45,17 +45,17 @@ func (r deliveries) Enqueue(ctx context.Context, d domain.DeliveryDraft) error {
 	if e != nil {
 		return repoError(e)
 	}
-	return exec(ctx, r.q, "INSERT INTO outbox(event_key,kind,reminder_id,digest_run_id,group_id,user_id,part,payload_json,next_attempt_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING", d.EventKey, d.Kind, d.ReminderID, d.DigestRunID, d.GroupID, d.UserID, d.Part, string(p), stamp(d.NextAttemptAt), stamp(d.ExpiresAt))
+	return exec(ctx, r.q, "INSERT INTO outbox(event_key,kind,reminder_id,digest_run_id,group_id,user_id,part,payload_json,next_attempt_at,expires_at,assignment_id) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING", d.EventKey, d.Kind, d.ReminderID, d.DigestRunID, d.GroupID, d.UserID, d.Part, string(p), stamp(d.NextAttemptAt), stamp(d.ExpiresAt), d.AssignmentID)
 }
 
-const deliveryColumns = "id,event_key,kind,reminder_id,digest_run_id,group_id,user_id,part,payload_json,status,attempts,next_attempt_at,expires_at,lease_token,lease_until,sent_at,telegram_message_id,COALESCE(last_error_code,'')"
+const deliveryColumns = "id,event_key,kind,reminder_id,digest_run_id,group_id,user_id,part,payload_json,status,attempts,next_attempt_at,expires_at,lease_token,lease_until,sent_at,telegram_message_id,COALESCE(last_error_code,''),assignment_id"
 
 func scanDelivery(row scanner) (*domain.Delivery, error) {
 	var d domain.Delivery
-	var rem, run, user, msg sql.NullInt64
+	var rem, run, user, msg, assignment sql.NullInt64
 	var payload, next, expiry string
 	var token, lease, sent sql.NullString
-	e := row.Scan(&d.ID, &d.EventKey, &d.Kind, &rem, &run, &d.GroupID, &user, &d.Part, &payload, &d.Status, &d.Attempts, &next, &expiry, &token, &lease, &sent, &msg, &d.LastErrorCode)
+	e := row.Scan(&d.ID, &d.EventKey, &d.Kind, &rem, &run, &d.GroupID, &user, &d.Part, &payload, &d.Status, &d.Attempts, &next, &expiry, &token, &lease, &sent, &msg, &d.LastErrorCode, &assignment)
 	if errors.Is(e, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -64,6 +64,9 @@ func scanDelivery(row scanner) (*domain.Delivery, error) {
 	}
 	if rem.Valid {
 		d.ReminderID = &rem.Int64
+	}
+	if assignment.Valid {
+		d.AssignmentID = &assignment.Int64
 	}
 	if run.Valid {
 		d.DigestRunID = &run.Int64
@@ -98,10 +101,22 @@ func (r deliveries) Fail(ctx context.Context, id int64, token string, status dom
 	return cas(ctx, r.q, "UPDATE outbox SET status=?,last_error_code=?,lease_token=NULL,lease_until=NULL WHERE id=? AND status='processing' AND lease_token=? AND lease_until>?", status, code, id, token, stamp(at))
 }
 func (r deliveries) CancelForAssignment(ctx context.Context, id int64, at time.Time) error {
+	if e := exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE kind='assignment_created' AND assignment_id=? AND status IN ('pending','processing')", id); e != nil {
+		return e
+	}
+	return r.CancelRemindersForAssignment(ctx, id, at)
+}
+func (r deliveries) CancelRemindersForAssignment(ctx context.Context, id int64, at time.Time) error {
 	return exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE kind='reminder' AND reminder_id IN (SELECT id FROM reminders WHERE assignment_id=?) AND status IN ('pending','processing')", id)
 }
 func (r deliveries) CancelForUser(ctx context.Context, uid int64, aid *int64, at time.Time) error {
-	return exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE user_id=? AND (? IS NULL OR reminder_id IN (SELECT id FROM reminders WHERE assignment_id=?)) AND status IN ('pending','processing')", uid, aid, aid)
+	if e := exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE user_id=? AND kind='assignment_created' AND (? IS NULL OR assignment_id=?) AND status IN ('pending','processing')", uid, aid, aid); e != nil {
+		return e
+	}
+	return r.CancelRemindersForUser(ctx, uid, aid, at)
+}
+func (r deliveries) CancelRemindersForUser(ctx context.Context, uid int64, aid *int64, at time.Time) error {
+	return exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE kind='reminder' AND user_id=? AND (? IS NULL OR reminder_id IN (SELECT id FROM reminders WHERE assignment_id=?)) AND status IN ('pending','processing')", uid, aid, aid)
 }
 func (r deliveries) CancelForGroup(ctx context.Context, gid int64, at time.Time) error {
 	if e := exec(ctx, r.q, "UPDATE outbox SET status='cancelled',lease_token=NULL,lease_until=NULL WHERE group_id=? AND kind='digest' AND status IN ('pending','processing')", gid); e != nil {

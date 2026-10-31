@@ -150,12 +150,12 @@ func (r assignments) List(ctx context.Context, f domain.AssignmentFilter, uid in
 	if e != nil {
 		return out, e
 	}
-	query := "SELECT " + assignmentColumns + ` FROM assignments a WHERE a.group_id=? AND a.status='active' AND (? IS NULL OR a.subject_id=?) AND (? IS NULL OR a.deadline_at>=?) AND (? IS NULL OR a.deadline_at<?) AND (? IS NULL OR a.deadline_at<?) AND (a.deadline_at>? OR (a.deadline_at=? AND a.id>?)) AND (?='all' OR (?='done')=EXISTS(SELECT 1 FROM completions c WHERE c.assignment_id=a.id AND c.user_id=?)) ORDER BY a.deadline_at,a.id LIMIT ?`
+	query := "SELECT " + assignmentColumns + ` FROM assignments a WHERE a.group_id=? AND a.status='active' AND (? IS NULL OR a.subject_id=?) AND (? IS NULL OR a.deadline_at>=?) AND (? IS NULL OR a.deadline_at<?) AND (? IS NULL OR a.deadline_at<?) AND (? IS NULL OR a.deadline_at>?) AND (a.deadline_at>? OR (a.deadline_at=? AND a.id>?)) AND (?='all' OR (?='done')=EXISTS(SELECT 1 FROM completions c WHERE c.assignment_id=a.id AND c.user_id=?)) ORDER BY a.deadline_at,a.id LIMIT ?`
 	done := f.DoneFilter
 	if done == "" {
 		done = "all"
 	}
-	rows, e := r.q.QueryContext(ctx, query, f.GroupID, f.SubjectID, f.SubjectID, timeArg(f.From), timeArg(f.From), timeArg(f.Until), timeArg(f.Until), timeArg(f.Before), timeArg(f.Before), t, t, id, done, done, uid, n+1)
+	rows, e := r.q.QueryContext(ctx, query, f.GroupID, f.SubjectID, f.SubjectID, timeArg(f.From), timeArg(f.From), timeArg(f.Until), timeArg(f.Until), timeArg(f.Before), timeArg(f.Before), timeArg(f.After), timeArg(f.After), t, t, id, done, done, uid, n+1)
 	if e != nil {
 		return out, repoError(e)
 	}

@@ -1,6 +1,7 @@
 services:
   bot:
     build: .
+    image: medical-bot:local
     env_file:
       - .env
     environment:
@@ -10,6 +11,21 @@ services:
     init: true
     restart: unless-stopped
     stop_grace_period: 10s
+
+  backup:
+    image: medical-bot:local
+    profiles: [maintenance]
+    entrypoint: ["/app/backup"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE, CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - bot_data:/data:ro
+      - ./backups:/backups
+    restart: "no"
 
 volumes:
   bot_data:

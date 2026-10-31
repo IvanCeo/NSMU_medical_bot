@@ -109,10 +109,19 @@ func (s *App) resolveFilter(u domain.User, f domain.AssignmentFilter) (domain.As
 	f.From = nil
 	f.Until = nil
 	f.Before = nil
+	f.After = nil
 	now := s.now().In(s.tz)
 	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, s.tz)
 	switch f.Period {
 	case "", "all":
+		if f.DoneFilter == "done" {
+			return f, domain.ErrInvalidInput
+		}
+		if f.DoneFilter != "" && f.DoneFilter != "all" && f.DoneFilter != "pending" {
+			return f, domain.ErrInvalidInput
+		}
+		f.After = &now
+		f.DoneFilter = "pending"
 	case "day":
 		end := start.AddDate(0, 0, 1)
 		f.From = &start
@@ -260,6 +269,9 @@ func (s *App) createAssignment(ctx context.Context, r Repositories, u domain.Use
 	if e := s.replanAssignment(ctx, r, a); e != nil {
 		return a, e
 	}
+	if e := s.planAssignmentCreated(ctx, r, a); e != nil {
+		return a, e
+	}
 	return a, s.log(ctx, r, u, gid, "create", "assignment", a.ID)
 }
 func (s *App) CreateAssignment(ctx context.Context, id int64, in domain.AssignmentInput) (domain.Assignment, error) {
@@ -391,7 +403,11 @@ func (s *App) SetComplete(ctx context.Context, id, aid, v int64, done bool) (dom
 		if e := r.Completions.Set(ctx, u.ID, aid, at); e != nil {
 			return e
 		}
-		if e := s.cancelUser(ctx, r, u.ID, &aid); e != nil {
+		cancel := s.cancelUser
+		if !done {
+			cancel = s.cancelUserReminders
+		}
+		if e := cancel(ctx, r, u.ID, &aid); e != nil {
 			return e
 		}
 		if !done {

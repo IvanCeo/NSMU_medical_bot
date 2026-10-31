@@ -109,12 +109,16 @@ func (t *Telegram) SendNotification(ctx context.Context, m domain.Outgoing) (dom
 	if m.Kind == "group" {
 		prefix = "Дедлайны на "
 	}
+	if m.EventKind == domain.AssignmentCreatedDelivery {
+		prefix = "Новое задание\n"
+	}
 	request := tg.NewMessage(m.ChatID, prefix+m.Text)
 	request.DisableWebPagePreview = true
 	var buttons [][]Button
-	for _, b := range m.Buttons {
-		title := b.Label
-		if title == "open_task" {
+	labels := taskLabels(m.Buttons)
+	for i, b := range m.Buttons {
+		title := labels[i]
+		if b.Label == "open_task" {
 			title = "Открыть задание"
 			if m.Kind == "group" {
 				title = fmt.Sprintf("Задание #%d", b.AssignmentID)

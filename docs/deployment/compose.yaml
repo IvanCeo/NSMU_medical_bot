@@ -1,0 +1,31 @@
+# Copy beside your server's .env; replace BOT_IMAGE with your published image.
+# Keep the existing Compose project name and volume name on an existing server.
+services:
+  bot:
+    image: ${BOT_IMAGE:?Set BOT_IMAGE to a published image tag}
+    env_file: [.env]
+    environment:
+      DB_PATH: /data/bot.db
+    volumes:
+      - bot_data:/data
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 10s
+
+  backup:
+    image: ${BOT_IMAGE:?Set BOT_IMAGE to a published image tag}
+    profiles: [maintenance]
+    entrypoint: ["/app/backup"]
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE, CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    volumes:
+      - bot_data:/data:ro
+      - ./backups:/backups
+    restart: "no"
+
+volumes:
+  bot_data:

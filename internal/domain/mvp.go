@@ -153,6 +153,7 @@ type AssignmentFilter struct {
 	// Bounds are resolved by the service using its configured timezone.
 	From, Until *time.Time
 	Before      *time.Time
+	After       *time.Time
 }
 type ReminderSource string
 
@@ -236,14 +237,15 @@ type DeliveryKind string
 type DeliveryStatus string
 
 const (
-	ReminderDelivery  DeliveryKind   = "reminder"
-	DigestDelivery    DeliveryKind   = "digest"
-	Pending           DeliveryStatus = "pending"
-	Processing        DeliveryStatus = "processing"
-	Sent              DeliveryStatus = "sent"
-	Skipped           DeliveryStatus = "skipped"
-	Failed            DeliveryStatus = "failed"
-	DeliveryCancelled DeliveryStatus = "cancelled"
+	ReminderDelivery          DeliveryKind   = "reminder"
+	DigestDelivery            DeliveryKind   = "digest"
+	AssignmentCreatedDelivery DeliveryKind   = "assignment_created"
+	Pending                   DeliveryStatus = "pending"
+	Processing                DeliveryStatus = "processing"
+	Sent                      DeliveryStatus = "sent"
+	Skipped                   DeliveryStatus = "skipped"
+	Failed                    DeliveryStatus = "failed"
+	DeliveryCancelled         DeliveryStatus = "cancelled"
 )
 
 type DeliveryPayload struct {
@@ -255,6 +257,7 @@ type DeliveryDraft struct {
 	EventKey                 string
 	Kind                     DeliveryKind
 	ReminderID, DigestRunID  *int64
+	AssignmentID             *int64
 	GroupID                  int64
 	UserID                   *int64
 	Part                     int
@@ -288,6 +291,7 @@ type OutgoingButton struct {
 type Outgoing struct {
 	ChatID     int64
 	Kind, Text string
+	EventKind  DeliveryKind
 	Buttons    []OutgoingButton
 }
 type MessageReceipt struct {

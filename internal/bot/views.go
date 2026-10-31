@@ -30,7 +30,7 @@ func (r *Router) menu(ctx context.Context, id int64, text string) error {
 	return r.show(ctx, id, 0, text, buttons)
 }
 func (r *Router) help(ctx context.Context, id int64) error {
-	text := "/start — меню\n/profile — профиль\n/join [код] — вступить в группу\n/leave — выйти с подтверждением\n/tasks — задания и сроки\n/subjects — предметы\n/settings — напоминания и тихие часы\n/cancel — отменить диалог\n\nНапоминания приходят лично. В группе публикуется только ежедневный дайджест. Время отображается в " + r.tz.String() + ".\nНе отправляй данные пациентов."
+	text := "/start — меню\n/profile — профиль\n/join [код] — вступить в группу\n/leave — выйти с подтверждением\n/tasks — задания и сроки\n/subjects — предметы\n/settings — уведомления и тихие часы\n/cancel — отменить диалог\n\nНовые задания и напоминания приходят лично. В группе публикуется только ежедневный дайджест. Время отображается в " + r.tz.String() + ".\nНе отправляй данные пациентов."
 	p, e := r.cases.Profile(ctx, id)
 	if e != nil {
 		return r.respondError(ctx, id, e)
@@ -61,7 +61,7 @@ func preferencesText(p domain.Preferences) string {
 	if p.RemindersEnabled {
 		state = "включены"
 	}
-	text := "Личные напоминания: " + state
+	text := "Личные уведомления: " + state
 	if p.QuietHours != nil {
 		text += "\nТихие часы: " + p.QuietHours.Start + "–" + p.QuietHours.End
 	} else {
@@ -116,13 +116,18 @@ func (r *Router) taskPage(ctx context.Context, id int64, f domain.AssignmentFilt
 		text += " · " + label(f.DoneFilter)
 	}
 	var rows [][]Button
+	titles := make([]domain.OutgoingButton, 0, len(p.Items))
 	for _, a := range p.Items {
+		titles = append(titles, domain.OutgoingButton{Label: a.Title, AssignmentID: a.ID})
+	}
+	labels := taskLabels(titles)
+	for i, a := range p.Items {
 		mark := "○"
 		if a.Done {
 			mark = "✓"
 		}
 		text += fmt.Sprintf("\n%s #%d · %s · %s", mark, a.ID, a.Title, a.DeadlineAt.In(r.tz).Format("02.01 15:04"))
-		rows = append(rows, []Button{{Text: fmt.Sprintf("Открыть #%d", a.ID), Data: fmt.Sprintf("view:%d", a.ID)}})
+		rows = append(rows, []Button{{Text: labels[i], Data: fmt.Sprintf("view:%d", a.ID)}})
 	}
 	if len(p.Items) == 0 {
 		text += "\nПока пусто."
@@ -343,7 +348,7 @@ func auditLabel(value string) string {
 }
 func prompt(key string) string {
 	prompts := map[string]string{
-		"invite": "Введи код приглашения. /cancel — отмена.", "leave_confirm": "Подтверди выход из группы. Ожидающие напоминания будут отменены.",
+		"invite": "Введи код приглашения. /cancel — отмена.", "leave_confirm": "Подтверди выход из группы. Ожидающие личные уведомления будут отменены.",
 		"choose_group": "Выбери учебную группу.", "admin_groups": "Группы: выбери существующую или создай новую.", "group_title": "Введи название группы (до 200 символов).", "admin_group": "Управление группой. Код ниже — приглашение; передай его участникам.",
 		"member_list": "Выбери участника.", "member_action": "Действие с участником.", "member_remove_confirm": "Подтверди исключение участника. С редактора сначала нужно снять полномочия.",
 		"subject_menu": "Управление предметами.", "subject_list": "Выбери предмет.", "subject_action": "Действие с предметом.", "subject_name": "Введи название предмета (до 200 символов).", "subject_teacher": "Введи преподавателя или «-», чтобы оставить поле пустым.",
@@ -362,7 +367,7 @@ func label(v string) string {
 	if v == "done" {
 		return "выполненные"
 	}
-	labels := map[string]string{"student": "студент", "editor": "редактор", "admin": "администратор", "active": "активно", "cancelled": "отменено", "homework": "домашнее задание", "test": "контрольная", "exam": "экзамен", "practice": "практика", "other": "другое", "low": "низкая важность", "normal": "обычная важность", "high": "высокая важность", "day": "сегодня", "week": "7 дней", "all": "все активные", "overdue": "просроченные", "next": "Далее →", "keep": "Оставить текущее", "finish": "Готово", "clear": "Убрать вложения", "confirm": "Подтвердить", "toggle": "Включить / выключить напоминания", "quiet": "Настроить тихие часы", "quiet_off": "Выключить тихие часы", "create_subject": "Создать предмет", "edit_subject": "Изменить предмет", "rename_subject": "Изменить название", "teacher": "Изменить преподавателя", "archive": "Архивировать", "restore": "Восстановить", "create_group": "Создать группу", "rename": "Переименовать", "rotate": "Новый код приглашения", "digest_toggle": "Включить / выключить дайджест", "members": "Участники и редакторы", "subjects": "Предметы", "add": "Добавить задание", "digest_preview": "Посмотреть дайджест", "audit": "Журнал", "grant_editor": "Назначить редактором", "revoke_editor": "Снять роль редактора", "remove_member": "Исключить", "back": "Назад"}
+	labels := map[string]string{"student": "студент", "editor": "редактор", "admin": "администратор", "active": "активно", "cancelled": "отменено", "homework": "домашнее задание", "test": "контрольная", "exam": "экзамен", "practice": "практика", "other": "другое", "low": "низкая важность", "normal": "обычная важность", "high": "высокая важность", "day": "сегодня", "week": "7 дней", "all": "все активные", "overdue": "просроченные", "next": "Далее →", "keep": "Оставить текущее", "finish": "Готово", "clear": "Убрать вложения", "confirm": "Подтвердить", "toggle": "Включить / выключить уведомления", "quiet": "Настроить тихие часы", "quiet_off": "Выключить тихие часы", "create_subject": "Создать предмет", "edit_subject": "Изменить предмет", "rename_subject": "Изменить название", "teacher": "Изменить преподавателя", "archive": "Архивировать", "restore": "Восстановить", "create_group": "Создать группу", "rename": "Переименовать", "rotate": "Новый код приглашения", "digest_toggle": "Включить / выключить дайджест", "members": "Участники и редакторы", "subjects": "Предметы", "add": "Добавить задание", "digest_preview": "Посмотреть дайджест", "audit": "Журнал", "grant_editor": "Назначить редактором", "revoke_editor": "Снять роль редактора", "remove_member": "Исключить", "back": "Назад"}
 	if s, ok := labels[v]; ok {
 		return s
 	}
